@@ -266,12 +266,16 @@ function tileXY(lon, lat, z) {
           Math.floor((1 - Math.log(Math.tan(la) + 1 / Math.cos(la)) / Math.PI) / 2 * n)];
 }
 
-/* опрашиваем пару тайлов над центром карты и объединяем найденное */
+/* Опрашиваем тайлы над ПОСТОЯННОЙ точкой — центром данных, а не там,
+   куда смотрит человек. Иначе стоит отъехать в сторону, и слои
+   пропадут из опроса: страница решит, что их удалили. Проверено:
+   один тайл над этой точкой на зумах 7-11 содержит все слои. */
+const PROBE = {lng: 106.845, lat: 10.800};
+
 async function probeTiles() {
-  const c = map.getCenter();
   const found = new Map();
-  for (const z of [9, 10]) {
-    const [x, y] = tileXY(c.lng, c.lat, z);
+  for (const z of [8, 10]) {
+    const [x, y] = tileXY(PROBE.lng, PROBE.lat, z);
     const url = 'https://api.mapbox.com/v4/' + TILESET + '/' + z + '/' + x + '/' + y +
                 '.vector.pbf?access_token=' + mapboxgl.accessToken;
     try {
