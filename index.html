@@ -90,20 +90,16 @@ const TILESET    = 'gleb1234323.0heu6saeh7s5';
 const POLL_MS    = 60000;
 const ADMIN      = new URLSearchParams(location.search).has('admin');
 
-/* Data Workbench называет слои хешами. Читаемые имена — здесь.
-   Слоя, которого тут нет, это не касается: он всё равно появится
-   на карте и в панели, просто с техническим именем. */
-const KNOWN = {
-  'f0eea9a65a4e0e8ca095': {name:'Metro1',            color:'#16B5B5'},
-  '22028bb37444ce31ef43': {name:'SHTP-1',            color:'#E08A2B'},
-  '8a0aeb2fbc21972b177a': {name:'shtp-2',            color:'#6C57C8'},
-  '1248a608fcd4603d5f86': {name:'Infrastructure',    color:'#7A4B2A'},
-  'a8b991f9d135c8996f19': {name:'Elysian',           color:'#E0479B'},
-  'a44120787e7b81c4ffaf': {name:'elysian-pointmain', color:'#A9BA1F'},
-  'eb3a799d2f031cab943e': {name:'Граница города',    color:'#3B7DD8'},
-  '96d51195b86183a75b79': {name:'Дороги',            color:'#D64545'}
-};
-const PALETTE = ['#D64545','#2E9E5B','#8E44AD','#B5561F','#0E8E8E','#3B7DD8'];
+/* Никаких заранее вписанных имён и цветов. Всё выводится само:
+     имя   — из полей label / name / ref самих объектов слоя,
+              если у всех объектов значение одно и то же;
+     цвет  — из палитры, по порядку слоёв в тайлсете;
+     границы — по наличию поля admin_level, их не заливаем.
+   Слой, у которого объекты названы по-разному, получит
+   технический номер: придумывать за тебя страница не будет.
+   Нужно точное имя — задай его в Studio, оно перебьёт всё. */
+const PALETTE = ['#16B5B5','#E08A2B','#6C57C8','#7A4B2A','#E0479B',
+                 '#A9BA1F','#3B7DD8','#D64545','#2E9E5B','#8E44AD'];
 
 /* фильтры по типу геометрии: без них кружок садится на каждую
    вершину линии, а заливка замыкает линии в кольца */
@@ -145,8 +141,8 @@ function setVis(ids, on) {
   ids.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', v); });
 }
 
-function addRow(group, label, ids, look, defaultOn) {
-  const key = group + '|' + label;
+function addRow(group, label, ids, look, defaultOn, stateKey) {
+  const key = stateKey || (group + '|' + label);
   const on = STATE.has(key) ? STATE.get(key) : defaultOn;
   const row = document.createElement('label');
   row.className = 'row' + (on ? '' : ' off');
@@ -169,10 +165,12 @@ function addRow(group, label, ids, look, defaultOn) {
   }
   row.appendChild(cb);
   row.appendChild(sw);
-  row.appendChild(document.createTextNode(label));
+  const text = document.createTextNode(label);
+  row.appendChild(text);
   groupBox(group).appendChild(row);
   STATE.set(key, on);
   setVis(ids, on);
+  return text;
 }
 
 /* ---------- карточка по клику ---------- */
@@ -289,6 +287,7 @@ async function build() {
   log = [];
   listEl.textContent = '';
   groupBoxes = new Map();
+  NEEDS_NAME.clear();
   const busy = document.getElementById('busy');
   busy.style.display = 'block';
 
@@ -340,9 +339,8 @@ async function build() {
     map.addSource('mbx', {type:'vector', url:'mapbox://' + TILESET});
   }
   rest.forEach((v, i) => {
-    const known = KNOWN[v.id];
-    const name  = known ? known.name : ('Слой ' + v.id.slice(0, 6));
-    const color = known ? known.color : PALETTE[i % PALETTE.length];
+    const name  = 'Слой ' + v.id.slice(0, 6);
+    const color = PALETTE[i % PALETTE.length];
     const base  = 'mbx-' + v.id;
     /* границы не заливаем: они покрывают всю сушу и закроют карту */
     const isBoundary = !!(v.fields &&
@@ -366,8 +364,11 @@ async function build() {
       catch (e) { log.push(spec.id + ': ' + e.message); }
     }
     if (!added.length) return;
-    addRow('Слои Mapbox', name, added,
-           isBoundary ? {kind:'line', color} : {kind:'dot', color}, true);
+    const textNode = addRow('Слои Mapbox', name, added,
+           isBoundary ? {kind:'line', color} : {kind:'dot', color}, true,
+           'mbx|' + v.id);
+    /* имя подставим из самих данных, когда приедут тайлы */
+    NEEDS_NAME.set(v.id, textNode);
     added.forEach(makeClickable);
   });
 
@@ -385,6 +386,36 @@ async function build() {
   }
   building = false;
 }
+
+/* ---------- имя слоя из его собственных данных ----------
+   Читаемые имена, которые ты задаёшь в Data Workbench, наружу
+   не отдаются: для них нужен секретный токен, а его в открытой
+   странице держать нельзя. Зато имя часто лежит в самих объектах:
+   поле label, name или ref. Если у всех объектов слоя значение
+   одно и то же — это и есть название слоя, ставим его на галочку.
+   Новый слой получит имя сам, без правки этого файла. */
+const NEEDS_NAME = new Map();
+
+function nameFromData() {
+  if (!NEEDS_NAME.size) return;
+  for (const [sl, textNode] of [...NEEDS_NAME]) {
+    let feats = [];
+    try { feats = map.querySourceFeatures('mbx', {sourceLayer: sl}); } catch (e) { continue; }
+    if (!feats.length) continue;
+    const vals = new Set();
+    for (const f of feats.slice(0, 200)) {
+      const p = f.properties || {};
+      const v = p.label || p.name || p['name:en'] || p.ref || p.short_name;
+      if (v) vals.add(String(v).trim());
+      if (vals.size > 1) break;
+    }
+    if (vals.size === 1) {
+      textNode.nodeValue = [...vals][0];
+      NEEDS_NAME.delete(sl);
+    }
+  }
+}
+map.on('idle', nameFromData);
 
 map.on('style.load', build);
 
