@@ -272,6 +272,8 @@ function tileXY(lon, lat, z) {
    один тайл над этой точкой на зумах 7-11 содержит все слои. */
 const PROBE = {lng: 106.845, lat: 10.800};
 
+let TILE_MAXZOOM = 12;   /* уточняется из справочника при сборке */
+
 async function probeTiles() {
   const found = new Map();
   for (const z of [8, 10]) {
@@ -376,14 +378,18 @@ async function build() {
   /* Справочник TileJSON берём только на первой сборке, как подстраховку
      если тайл не приехал. Дальше не спрашиваем: он кеширован и вернул бы
      слой, который ты уже удалил. */
-  if (!probed.size && !SEEN.size) {
-    try {
-      const tj = await fetchJSON(tilejsonURL());
+  /* Справочник спрашиваем только за maxzoom: он меняется редко,
+     поэтому кеш тут не мешает. Список слоёв из него берём лишь
+     когда тайл не приехал вовсе. */
+  try {
+    const tj = await fetchJSON(tilejsonURL());
+    if (typeof tj.maxzoom === 'number') TILE_MAXZOOM = tj.maxzoom;
+    if (!probed.size && !SEEN.size) {
       for (const v of (tj.vector_layers || [])) {
         if (!SEEN.has(v.id)) SEEN.set(v.id, new Set(Object.keys(v.fields || {})));
       }
-    } catch (e) { log.push('справочник не прочитан: ' + e.message); }
-  }
+    }
+  } catch (e) { log.push('справочник не прочитан: ' + e.message); }
 
   const vl = [...SEEN.keys()].sort().map(id => ({id, fields: {}, keys: SEEN.get(id)}));
   log.push('слоёв найдено: ' + vl.length + ' (в тайле ' + probed.size + ')');
@@ -423,7 +429,19 @@ async function build() {
   /* 2. остальные слои тайлсета рисуем сами */
   const rest = vl.filter(v => !styled.has(v.id));
   if (rest.length && !map.getSource('mbx')) {
-    map.addSource('mbx', {type:'vector', url:'mapbox://' + TILESET});
+    /* Ссылку mapbox:// не используем намеренно. По ней движок берёт
+       справочник TileJSON и сверяет с ним имена слоёв, а справочник
+       лежит в кеше пять минут: только что добавленный слой в нём
+       отсутствует, и движок молча отказывается его рисовать —
+       галочка есть, геометрии нет. С прямым адресом тайлов сверки
+       нет, рисуется всё, что реально лежит в тайле. */
+    map.addSource('mbx', {
+      type: 'vector',
+      tiles: ['https://api.mapbox.com/v4/' + TILESET +
+              '/{z}/{x}/{y}.vector.pbf?access_token=' + mapboxgl.accessToken],
+      minzoom: 0,
+      maxzoom: TILE_MAXZOOM
+    });
   }
   rest.forEach((v, i) => {
     const name  = 'Слой ' + v.id.slice(0, 6);
