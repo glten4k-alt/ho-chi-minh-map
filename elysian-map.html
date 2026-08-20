@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elysian — инфраструктура района</title>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+<style>
+  html,body{margin:0;height:100%;font-family:"Vela Sans","Helvetica Neue",Arial,sans-serif;
+    background:#F7F7F7;color:#1C1B1B}
+  #map{position:absolute;inset:0}
+  #panel{
+    position:absolute;top:16px;left:16px;z-index:2;display:none;
+    background:rgba(247,247,247,.96);border-radius:10px;padding:13px 16px 14px;
+    box-shadow:0 2px 14px rgba(28,27,27,.20);width:244px;
+    max-height:calc(100% - 32px);overflow-y:auto}
+  #head{font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+    margin:0;font-weight:600;display:flex;align-items:center;
+    justify-content:space-between;gap:12px;cursor:pointer;user-select:none}
+  #head .caret{font-size:10px;color:#939CA9;transition:transform .15s}
+  #panel.closed .caret{transform:rotate(-90deg)}
+  #panel.closed #body{display:none}
+  #body{margin-top:10px}
+  .grp{font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;color:#939CA9;
+    margin:14px 0 5px;font-weight:600;line-height:1.4}
+  .grp:first-child{margin-top:2px}
+  .row{display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;
+    font-size:12.5px;line-height:1.3;min-height:24px}
+  .row input{accent-color:#1C1B1B;width:15px;height:15px;cursor:pointer;margin:0;flex:none}
+  .row.off{color:#939CA9}
+  .swatch{width:24px;flex:none;height:0;border-top-width:3px;border-top-style:solid}
+  .sw-fill{height:11px;border:0;border-radius:2px}
+  .sw-dot{height:11px;width:11px;border-radius:50%;border:1.5px solid rgba(28,27,27,.5)}
+  .sw-none{border:0}
+  #admin{margin-top:12px;padding-top:10px;border-top:1px solid #D8D9DE;
+    font-size:10.5px;line-height:1.5;color:#8B8B8B;display:none;white-space:pre-wrap}
+  #busy{position:absolute;top:16px;left:278px;z-index:2;background:rgba(247,247,247,.96);
+    border-radius:8px;padding:7px 11px;font-size:11.5px;color:#8B8B8B;
+    box-shadow:0 2px 10px rgba(28,27,27,.14);display:none}
+  .mapboxgl-popup-content{
+    font-family:"Vela Sans","Helvetica Neue",Arial,sans-serif;
+    padding:11px 13px;border-radius:8px;box-shadow:0 2px 14px rgba(28,27,27,.22)}
+  .pop-name{font-size:12.5px;font-weight:600;line-height:1.3}
+  .pop-meta{font-size:10.5px;color:#8B8B8B;margin-top:3px;letter-spacing:.04em;
+    text-transform:uppercase}
+  .pop-desc{font-size:11.5px;line-height:1.45;margin-top:7px}
+  @media (max-width:600px){
+    #panel{top:10px;left:10px;right:10px;width:auto;padding:11px 13px 12px;
+      max-height:calc(100% - 20px)}
+    #busy{left:10px;right:10px;top:auto;bottom:10px}
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="busy">Читаю слои из Mapbox…</div>
+<div id="panel">
+  <h1 id="head">Слои<span class="caret">▾</span></h1>
+  <div id="body">
+    <div id="list"></div>
+    <div id="admin"></div>
+  </div>
+</div>
+<script>
+mapboxgl.accessToken = 'pk.eyJ1IjoiZ2xlYjEyMzQzMjMiLCJhIjoiY21zc255cTZsMDU2MjJ5cXVuY2t4cmQ4NyJ9.3X8cxs2X1_oenCyBV7TCGg';
+
+/* ============================================================
+   В этом файле нет ни карты, ни геометрии — только код.
+   Всё содержимое приезжает из Mapbox при открытии страницы:
+
+     подложка   стиль Light из Mapbox Studio
+     геометрия  тайлсет River из Data Workbench
+     галочки    по одной на каждый слой тайлсета
+
+   Правишь стиль и жмёшь Publish, или заново обрабатываешь
+   тайлсет — страница замечает это сама, в пределах минуты.
+   Файл при этом не меняется и перезаливать его не нужно.
+
+   Оформление. Пока слой не оформлен в Studio, страница рисует
+   его сама простым цветом. Как только ты добавишь этот слой
+   в стиль и опубликуешь — страница перестанет рисовать его
+   сама и возьмёт твой вид. Дублей не будет.
+   ============================================================ */
+
+const STYLE_USER = 'gleb1234323';
+const STYLE_ID   = 'cmt05o2mp000901sj1oqbco06';
+const STYLE      = 'mapbox://styles/' + STYLE_USER + '/' + STYLE_ID;
+const TILESET    = 'gleb1234323.0heu6saeh7s5';
+const POLL_MS    = 60000;
+const ADMIN      = new URLSearchParams(location.search).has('admin');
+
+/* Никаких заранее вписанных имён и цветов. Всё выводится само:
+     имя   — из полей label / name / ref самих объектов слоя,
+              если у всех объектов значение одно и то же;
+     цвет  — из палитры, по порядку слоёв в тайлсете;
+     границы — по наличию поля admin_level, их не заливаем.
+   Слой, у которого объекты названы по-разному, получит
+   технический номер: придумывать за тебя страница не будет.
+   Нужно точное имя — задай его в Studio, оно перебьёт всё. */
+const PALETTE = ['#16B5B5','#E08A2B','#6C57C8','#7A4B2A','#E0479B',
+                 '#A9BA1F','#3B7DD8','#D64545','#2E9E5B','#8E44AD'];
+
+/* фильтры по типу геометрии: без них кружок садится на каждую
+   вершину линии, а заливка замыкает линии в кольца */
+const GT_POLY  = ['match',['geometry-type'],['Polygon','MultiPolygon'],true,false];
+const GT_LINE  = ['match',['geometry-type'],
+                  ['LineString','MultiLineString','Polygon','MultiPolygon'],true,false];
+const GT_POINT = ['match',['geometry-type'],['Point','MultiPoint'],true,false];
+
+const map = new mapboxgl.Map({
+  container: 'map', style: STYLE,
+  center: [106.845, 10.800], zoom: 11.2, minZoom: 8, maxZoom: 17
+});
+map.addControl(new mapboxgl.NavigationControl({showCompass:false}), 'top-right');
+map.addControl(new mapboxgl.ScaleControl({maxWidth:110, unit:'metric'}), 'bottom-left');
+
+const panel = document.getElementById('panel');
+const listEl = document.getElementById('list');
+document.getElementById('head').addEventListener('click', () => panel.classList.toggle('closed'));
+if (window.innerWidth > 0 && window.innerWidth < 600) panel.classList.add('closed');
+
+const STATE = new Map();     /* выставленные галочки переживают перерисовку */
+let log = [];
+let groupBoxes = new Map();
+
+function groupBox(name) {
+  if (groupBoxes.has(name)) return groupBoxes.get(name);
+  const h = document.createElement('div');
+  h.className = 'grp';
+  h.textContent = name;
+  listEl.appendChild(h);
+  const box = document.createElement('div');
+  listEl.appendChild(box);
+  groupBoxes.set(name, box);
+  return box;
+}
+
+function setVis(ids, on) {
+  const v = on ? 'visible' : 'none';
+  ids.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', v); });
+}
+
+function addRow(group, label, ids, look, defaultOn, stateKey) {
+  const key = stateKey || (group + '|' + label);
+  const on = STATE.has(key) ? STATE.get(key) : defaultOn;
+  const row = document.createElement('label');
+  row.className = 'row' + (on ? '' : ' off');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = on;
+  cb.addEventListener('change', () => {
+    row.classList.toggle('off', !cb.checked);
+    STATE.set(key, cb.checked);
+    setVis(ids, cb.checked);
+  });
+  const sw = document.createElement('span');
+  if (!look || look.kind === 'none') sw.className = 'swatch sw-none';
+  else if (look.kind === 'dot') { sw.className = 'swatch sw-dot'; sw.style.background = look.color; }
+  else if (look.kind === 'fill') { sw.className = 'swatch sw-fill'; sw.style.background = look.color; }
+  else {
+    sw.className = 'swatch';
+    sw.style.borderTopColor = look.color;
+    sw.style.borderTopStyle = look.dash || 'solid';
+  }
+  row.appendChild(cb);
+  row.appendChild(sw);
+  const text = document.createTextNode(label);
+  row.appendChild(text);
+  groupBox(group).appendChild(row);
+  STATE.set(key, on);
+  setVis(ids, on);
+  return text;
+}
+
+/* ---------- карточка по клику ---------- */
+const popup = new mapboxgl.Popup({closeButton:true, closeOnClick:true, maxWidth:'260px', offset:10});
+const clickable = new Set();
+
+function showPopup(lngLat, props) {
+  const name = props.name || props['name:en'] || props.short_name;
+  if (!name) return;
+  const box = document.createElement('div');
+  const n = document.createElement('div');
+  n.className = 'pop-name';
+  n.textContent = String(name);
+  box.appendChild(n);
+  const bits = [];
+  for (const k of ['type','status','completion_year']) if (props[k]) bits.push(String(props[k]));
+  if (bits.length) {
+    const m = document.createElement('div');
+    m.className = 'pop-meta';
+    m.textContent = bits.join(' · ');
+    box.appendChild(m);
+  }
+  if (props.description) {
+    const d = document.createElement('div');
+    d.className = 'pop-desc';
+    d.textContent = String(props.description);
+    box.appendChild(d);
+  }
+  popup.setLngLat(lngLat).setDOMContent(box).addTo(map);
+}
+
+/* слушатели привязаны к id слоя и живут дольше перерисовки */
+function makeClickable(id) {
+  if (clickable.has(id)) return;
+  clickable.add(id);
+  map.on('click', id, e => {
+    if (e.features && e.features.length) showPopup(e.lngLat, e.features[0].properties || {});
+  });
+  map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
+}
+
+/* ---------- чтение списка слоёв прямо из тайла ----------
+   Справочник TileJSON у Mapbox лежит в кеше по пять минут, и разные
+   узлы отдают разное: то восемь слоёв, то девять. Опираться на него
+   нельзя — карта начинает пересобираться по кругу. Тайлы отдаются
+   свежими, а имена слоёв и названия полей лежат прямо в тайле,
+   поэтому читаем их оттуда. Разбор минимальный: только имя слоя
+   (поле 1) и список ключей (поле 3), геометрия не нужна. */
+function pbfLayers(buffer) {
+  const u = new Uint8Array(buffer);
+  const dec = new TextDecoder();
+  let i = 0;
+  const out = new Map();
+  function varint() {
+    let r = 0, s = 0, b;
+    do { b = u[i++]; r += (b & 0x7f) * Math.pow(2, s); s += 7; } while (b & 0x80);
+    return r;
+  }
+  function skip(wt) {
+    if (wt === 0) { let b; do { b = u[i++]; } while (b & 0x80); }
+    else if (wt === 2) { const n = varint(); i += n; }
+    else if (wt === 5) { i += 4; }
+    else if (wt === 1) { i += 8; }
+    else { i = u.length; }
+  }
+  while (i < u.length) {
+    const key = varint(), fn = key >> 3, wt = key & 7;
+    if (fn === 3 && wt === 2) {
+      const len = varint(), end = i + len;
+      let name = null;
+      const keys = new Set();
+      while (i < end) {
+        const k = varint(), lfn = k >> 3, lwt = k & 7;
+        if (lwt === 2) {
+          const n = varint();
+          if (lfn === 1) name = dec.decode(u.subarray(i, i + n));
+          else if (lfn === 3) keys.add(dec.decode(u.subarray(i, i + n)));
+          i += n;
+        } else skip(lwt);
+      }
+      i = end;
+      if (name) out.set(name, keys);
+    } else skip(wt);
+  }
+  return out;
+}
+
+function tileXY(lon, lat, z) {
+  const n = Math.pow(2, z);
+  const la = lat * Math.PI / 180;
+  return [Math.floor((lon + 180) / 360 * n),
+          Math.floor((1 - Math.log(Math.tan(la) + 1 / Math.cos(la)) / Math.PI) / 2 * n)];
+}
+
+/* опрашиваем пару тайлов над центром карты и объединяем найденное */
+async function probeTiles() {
+  const c = map.getCenter();
+  const found = new Map();
+  for (const z of [9, 10]) {
+    const [x, y] = tileXY(c.lng, c.lat, z);
+    const url = 'https://api.mapbox.com/v4/' + TILESET + '/' + z + '/' + x + '/' + y +
+                '.vector.pbf?access_token=' + mapboxgl.accessToken;
+    try {
+      const r = await fetch(url, {cache:'reload'});
+      if (!r.ok) continue;
+      const buf = await r.arrayBuffer();
+      for (const [id, keys] of pbfLayers(buf)) {
+        if (!found.has(id)) found.set(id, new Set());
+        keys.forEach(k => found.get(id).add(k));
+      }
+    } catch (e) { log.push('тайл z' + z + ': ' + e.message); }
+  }
+  return found;
+}
+
+/* ---------- адреса, с обходом кеша ---------- */
+function nocache() { return '&_cb=' + Date.now(); }
+/* без параметра secure: с ним Mapbox отдаёт ответ из кеша
+   с max-age=43200, и новый слой появился бы только через 12 часов */
+function tilejsonURL() {
+  return 'https://api.mapbox.com/v4/' + TILESET + '.json?access_token=' +
+         mapboxgl.accessToken + nocache();
+}
+function styleURL() {
+  return 'https://api.mapbox.com/styles/v1/' + STYLE_USER + '/' + STYLE_ID +
+         '?access_token=' + mapboxgl.accessToken + nocache();
+}
+async function fetchJSON(url) {
+  const r = await fetch(url, {cache:'reload'});
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+/* ---------- вид галочки для слоёв, оформленных в Studio ---------- */
+function firstColor(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) for (const x of v) { const c = firstColor(x); if (c) return c; }
+  return null;
+}
+function paintOf(layer, key) {
+  try { return map.getPaintProperty(layer.id, key); } catch (e) { return undefined; }
+}
+function lookOfStyleLayer(layer) {
+  if (layer.type === 'symbol') return {kind:'none'};
+  if (layer.type === 'line')
+    return {kind:'line', color: firstColor(paintOf(layer,'line-color')) || '#1C1B1B',
+            dash: paintOf(layer,'line-dasharray') ? 'dashed' : 'solid'};
+  if (layer.type === 'circle')
+    return {kind:'dot', color: firstColor(paintOf(layer,'circle-color')) || '#1C1B1B'};
+  if (layer.type === 'fill')
+    return {kind:'fill', color: firstColor(paintOf(layer,'fill-color')) || '#D8D9DE'};
+  if (layer.type === 'fill-extrusion')
+    return {kind:'fill', color: firstColor(paintOf(layer,'fill-extrusion-color')) || '#D8D9DE'};
+  return {kind:'none'};
+}
+
+/* "Группа - Название" в имени слоя Studio раскладывает галочки
+   по разделам. Не обязательно. Хвост после " / " отбрасывается,
+   чтобы линия и её подписи попали под одну галочку. */
+const SEPS = [' — ', ' – ', ' | ', ' - '];
+function parseName(id) {
+  for (const sep of SEPS) {
+    const i = id.indexOf(sep);
+    if (i > 0) {
+      const group = id.slice(0, i).trim();
+      const label = id.slice(i + sep.length).split(' / ')[0].trim();
+      if (group && label) return {group, label};
+    }
+  }
+  return {group: 'Оформлено в Studio', label: String(id).split(' / ')[0].trim()};
+}
+
+/* ---------- сборка ---------- */
+let building = false;
+let seenStyleModified = null;
+const SEEN = new Map();      /* слой -> набор его полей, накопительно */
+
+async function build() {
+  if (building) return;
+  building = true;
+  log = [];
+  listEl.textContent = '';
+  groupBoxes = new Map();
+  NEEDS_NAME.clear();
+  const busy = document.getElementById('busy');
+  busy.style.display = 'block';
+
+  /* список слоёв: из тайлов, плюс всё, что видели раньше.
+     Слой не исчезает из панели из-за того, что кеш Mapbox
+     на секунду отдал старый ответ. */
+  const probed = await probeTiles();
+  for (const [id, keys] of probed) {
+    if (!SEEN.has(id)) SEEN.set(id, new Set());
+    keys.forEach(k => SEEN.get(id).add(k));
+  }
+  try {                                  /* справочник — как подстраховка */
+    const tj = await fetchJSON(tilejsonURL());
+    for (const v of (tj.vector_layers || [])) {
+      if (!SEEN.has(v.id)) SEEN.set(v.id, new Set(Object.keys(v.fields || {})));
+    }
+  } catch (e) { log.push('справочник не прочитан: ' + e.message); }
+
+  const vl = [...SEEN.keys()].sort().map(id => ({id, fields: {}, keys: SEEN.get(id)}));
+  log.push('слоёв найдено: ' + vl.length + ' (в тайле ' + probed.size + ')');
+  const ids = new Set(vl.map(v => v.id));
+
+  /* какие слои тайлсета уже оформлены в стиле — их сами не рисуем */
+  const styled = new Map();
+  for (const layer of map.getStyle().layers) {
+    const sl = layer['source-layer'];
+    if (sl && ids.has(sl)) {
+      if (!styled.has(sl)) styled.set(sl, []);
+      styled.get(sl).push(layer);
+    }
+  }
+
+  /* 1. слои, оформленные в Studio */
+  let nStyled = 0;
+  for (const [sl, layers] of styled) {
+    const groups = new Map();
+    for (const l of layers) {
+      const p = parseName(String(l.id));
+      const k = p.group + '|' + p.label;
+      if (!groups.has(k)) groups.set(k, {p, list: []});
+      groups.get(k).list.push(l);
+    }
+    for (const {p, list} of groups.values()) {
+      const on = list.some(l => {
+        try { return map.getLayoutProperty(l.id, 'visibility') !== 'none'; }
+        catch (e) { return true; }
+      });
+      addRow(p.group, p.label, list.map(l => l.id), lookOfStyleLayer(list[0]), on);
+      list.forEach(l => makeClickable(l.id));
+      nStyled++;
+    }
+  }
+
+  /* 2. остальные слои тайлсета рисуем сами */
+  const rest = vl.filter(v => !styled.has(v.id));
+  if (rest.length && !map.getSource('mbx')) {
+    map.addSource('mbx', {type:'vector', url:'mapbox://' + TILESET});
+  }
+  rest.forEach((v, i) => {
+    const name  = 'Слой ' + v.id.slice(0, 6);
+    const color = PALETTE[i % PALETTE.length];
+    const base  = 'mbx-' + v.id;
+    /* границы не заливаем: они покрывают всю сушу и закроют карту */
+    const isBoundary = !!(v.keys && v.keys.has('admin_level'));
+    const added = [];
+    const specs = [];
+    if (!isBoundary) specs.push({id: base+'-fill', type:'fill', source:'mbx',
+      'source-layer': v.id, filter: GT_POLY,
+      paint:{'fill-color':color,'fill-opacity':0.28}});
+    specs.push({id: base+'-line', type:'line', source:'mbx', 'source-layer': v.id,
+      filter: GT_LINE, layout:{'line-join':'bevel'},
+      paint:{'line-color':color, 'line-width': isBoundary
+        ? ['interpolate',['linear'],['zoom'], 9,2.0, 12,3.2, 15,4.6]
+        : ['interpolate',['linear'],['zoom'], 9,1.1, 12,2.0, 15,3.4]}});
+    specs.push({id: base+'-circle', type:'circle', source:'mbx', 'source-layer': v.id,
+      filter: GT_POINT,
+      paint:{'circle-radius':['interpolate',['linear'],['zoom'], 9,3, 12,4.2, 15,6.5],
+             'circle-color':color,'circle-stroke-color':'#F7F7F7','circle-stroke-width':1.4}});
+    for (const spec of specs) {
+      try { map.addLayer(spec); added.push(spec.id); }
+      catch (e) { log.push(spec.id + ': ' + e.message); }
+    }
+    if (!added.length) return;
+    const textNode = addRow('Слои Mapbox', name, added,
+           isBoundary ? {kind:'line', color} : {kind:'dot', color}, true,
+           'mbx|' + v.id);
+    /* имя подставим из самих данных, когда приедут тайлы */
+    NEEDS_NAME.set(v.id, textNode);
+    added.forEach(makeClickable);
+  });
+
+  log.push('оформлено в Studio: ' + nStyled + ', отрисовано страницей: ' + rest.length);
+  busy.style.display = 'none';
+  const rows = document.querySelectorAll('#panel .row').length;
+  panel.style.display = (rows || ADMIN) ? 'block' : 'none';
+
+  if (ADMIN) {
+    const a = document.getElementById('admin');
+    a.style.display = 'block';
+    a.textContent = log.join('\n') +
+      '\n\nСлой, оформленный в Studio, страница рисовать не будет' +
+      '\nи возьмёт твой вид. Имя слоя задаёт подпись галочки.';
+  }
+  building = false;
+}
+
+/* ---------- имя слоя из его собственных данных ----------
+   Читаемые имена, которые ты задаёшь в Data Workbench, наружу
+   не отдаются: для них нужен секретный токен, а его в открытой
+   странице держать нельзя. Зато имя часто лежит в самих объектах:
+   поле label, name или ref. Если у всех объектов слоя значение
+   одно и то же — это и есть название слоя, ставим его на галочку.
+   Новый слой получит имя сам, без правки этого файла. */
+const NEEDS_NAME = new Map();
+
+function nameFromData() {
+  if (!NEEDS_NAME.size) return;
+  for (const [sl, textNode] of [...NEEDS_NAME]) {
+    let feats = [];
+    try { feats = map.querySourceFeatures('mbx', {sourceLayer: sl}); } catch (e) { continue; }
+    if (!feats.length) continue;
+    const vals = new Set();
+    for (const f of feats.slice(0, 200)) {
+      const p = f.properties || {};
+      const v = p.label || p.name || p['name:en'] || p.ref || p.short_name;
+      if (v) vals.add(String(v).trim());
+      if (vals.size > 1) break;
+    }
+    if (vals.size === 1) {
+      textNode.nodeValue = [...vals][0];
+      NEEDS_NAME.delete(sl);
+    }
+  }
+}
+map.on('idle', nameFromData);
+
+map.on('style.load', build);
+
+/* раз в минуту спрашиваем Mapbox, не поменялось ли что-нибудь */
+async function watch() {
+  try {
+    const st = await fetchJSON(styleURL());
+    const mod = String(st.modified || st.created || '');
+    if (seenStyleModified === null) seenStyleModified = mod;
+    else if (mod !== seenStyleModified) {
+      seenStyleModified = mod;
+      map.setStyle(STYLE, {diff:false});     /* style.load → build() */
+      return;
+    }
+  } catch (e) {}
+  /* пересобираем только если появился слой, которого раньше не было.
+     Исчезновение игнорируем: это почти всегда кеш, а не удаление. */
+  try {
+    const probed = await probeTiles();
+    let grew = false;
+    for (const id of probed.keys()) if (!SEEN.has(id)) grew = true;
+    if (grew) map.setStyle(STYLE, {diff:false});
+  } catch (e) {}
+}
+setInterval(watch, POLL_MS);
+
+map.on('error', e => {
+  const m = (e && e.error && e.error.message) || '';
+  if (m) log.push('ошибка карты: ' + m);
+});
+</script>
+</body>
+</html>
