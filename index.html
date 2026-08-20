@@ -100,7 +100,8 @@ const KNOWN = {
   '1248a608fcd4603d5f86': {name:'Infrastructure',    color:'#7A4B2A'},
   'a8b991f9d135c8996f19': {name:'Elysian',           color:'#E0479B'},
   'a44120787e7b81c4ffaf': {name:'elysian-pointmain', color:'#A9BA1F'},
-  'eb3a799d2f031cab943e': {name:'Граница города',    color:'#3B7DD8'}
+  'eb3a799d2f031cab943e': {name:'Граница города',    color:'#3B7DD8'},
+  '96d51195b86183a75b79': {name:'Дороги',            color:'#D64545'}
 };
 const PALETTE = ['#D64545','#2E9E5B','#8E44AD','#B5561F','#0E8E8E','#3B7DD8'];
 
@@ -216,8 +217,10 @@ function makeClickable(id) {
 
 /* ---------- адреса, с обходом кеша ---------- */
 function nocache() { return '&_cb=' + Date.now(); }
+/* без параметра secure: с ним Mapbox отдаёт ответ из кеша
+   с max-age=43200, и новый слой появился бы только через 12 часов */
 function tilejsonURL() {
-  return 'https://api.mapbox.com/v4/' + TILESET + '.json?secure&access_token=' +
+  return 'https://api.mapbox.com/v4/' + TILESET + '.json?access_token=' +
          mapboxgl.accessToken + nocache();
 }
 function styleURL() {
@@ -225,7 +228,7 @@ function styleURL() {
          '?access_token=' + mapboxgl.accessToken + nocache();
 }
 async function fetchJSON(url) {
-  const r = await fetch(url, {cache:'no-store'});
+  const r = await fetch(url, {cache:'reload'});
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.json();
 }
