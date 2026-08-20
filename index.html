@@ -213,6 +213,80 @@ function makeClickable(id) {
   map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
 }
 
+/* ---------- чтение списка слоёв прямо из тайла ----------
+   Справочник TileJSON у Mapbox лежит в кеше по пять минут, и разные
+   узлы отдают разное: то восемь слоёв, то девять. Опираться на него
+   нельзя — карта начинает пересобираться по кругу. Тайлы отдаются
+   свежими, а имена слоёв и названия полей лежат прямо в тайле,
+   поэтому читаем их оттуда. Разбор минимальный: только имя слоя
+   (поле 1) и список ключей (поле 3), геометрия не нужна. */
+function pbfLayers(buffer) {
+  const u = new Uint8Array(buffer);
+  const dec = new TextDecoder();
+  let i = 0;
+  const out = new Map();
+  function varint() {
+    let r = 0, s = 0, b;
+    do { b = u[i++]; r += (b & 0x7f) * Math.pow(2, s); s += 7; } while (b & 0x80);
+    return r;
+  }
+  function skip(wt) {
+    if (wt === 0) { let b; do { b = u[i++]; } while (b & 0x80); }
+    else if (wt === 2) { const n = varint(); i += n; }
+    else if (wt === 5) { i += 4; }
+    else if (wt === 1) { i += 8; }
+    else { i = u.length; }
+  }
+  while (i < u.length) {
+    const key = varint(), fn = key >> 3, wt = key & 7;
+    if (fn === 3 && wt === 2) {
+      const len = varint(), end = i + len;
+      let name = null;
+      const keys = new Set();
+      while (i < end) {
+        const k = varint(), lfn = k >> 3, lwt = k & 7;
+        if (lwt === 2) {
+          const n = varint();
+          if (lfn === 1) name = dec.decode(u.subarray(i, i + n));
+          else if (lfn === 3) keys.add(dec.decode(u.subarray(i, i + n)));
+          i += n;
+        } else skip(lwt);
+      }
+      i = end;
+      if (name) out.set(name, keys);
+    } else skip(wt);
+  }
+  return out;
+}
+
+function tileXY(lon, lat, z) {
+  const n = Math.pow(2, z);
+  const la = lat * Math.PI / 180;
+  return [Math.floor((lon + 180) / 360 * n),
+          Math.floor((1 - Math.log(Math.tan(la) + 1 / Math.cos(la)) / Math.PI) / 2 * n)];
+}
+
+/* опрашиваем пару тайлов над центром карты и объединяем найденное */
+async function probeTiles() {
+  const c = map.getCenter();
+  const found = new Map();
+  for (const z of [9, 10]) {
+    const [x, y] = tileXY(c.lng, c.lat, z);
+    const url = 'https://api.mapbox.com/v4/' + TILESET + '/' + z + '/' + x + '/' + y +
+                '.vector.pbf?access_token=' + mapboxgl.accessToken;
+    try {
+      const r = await fetch(url, {cache:'reload'});
+      if (!r.ok) continue;
+      const buf = await r.arrayBuffer();
+      for (const [id, keys] of pbfLayers(buf)) {
+        if (!found.has(id)) found.set(id, new Set());
+        keys.forEach(k => found.get(id).add(k));
+      }
+    } catch (e) { log.push('тайл z' + z + ': ' + e.message); }
+  }
+  return found;
+}
+
 /* ---------- адреса, с обходом кеша ---------- */
 function nocache() { return '&_cb=' + Date.now(); }
 /* без параметра secure: с ним Mapbox отдаёт ответ из кеша
@@ -273,13 +347,9 @@ function parseName(id) {
 /* ---------- сборка ---------- */
 let building = false;
 let seenStyleModified = null;
-let seenTilesetKey = null;
-
-function tilesetKey(tj) {
-  if (!tj) return null;
-  return String(tj.modified || '') + '|' +
-         (tj.vector_layers || []).map(v => v.id).sort().join(',');
-}
+const SEEN = new Map();      /* слой -> набор его полей */
+const MISS = new Map();      /* слой -> сколько опросов подряд его не видно */
+const MISS_LIMIT = 3;        /* три опроса подряд = удалён, а не кеш мигнул */
 
 async function build() {
   if (building) return;
@@ -291,15 +361,28 @@ async function build() {
   const busy = document.getElementById('busy');
   busy.style.display = 'block';
 
-  let vl = [];
-  try {
-    const tj = await fetchJSON(tilejsonURL());
-    vl = tj.vector_layers || [];
-    seenTilesetKey = tilesetKey(tj) || seenTilesetKey;
-    log.push('слоёв в тайлсете: ' + vl.length);
-  } catch (e) {
-    log.push('тайлсет не прочитан: ' + e.message);
+  /* список слоёв: из тайлов, плюс всё, что видели раньше.
+     Слой не исчезает из панели из-за того, что кеш Mapbox
+     на секунду отдал старый ответ. */
+  const probed = await probeTiles();
+  for (const [id, keys] of probed) {
+    if (!SEEN.has(id)) SEEN.set(id, new Set());
+    keys.forEach(k => SEEN.get(id).add(k));
   }
+  /* Справочник TileJSON берём только на первой сборке, как подстраховку
+     если тайл не приехал. Дальше не спрашиваем: он кеширован и вернул бы
+     слой, который ты уже удалил. */
+  if (!probed.size && !SEEN.size) {
+    try {
+      const tj = await fetchJSON(tilejsonURL());
+      for (const v of (tj.vector_layers || [])) {
+        if (!SEEN.has(v.id)) SEEN.set(v.id, new Set(Object.keys(v.fields || {})));
+      }
+    } catch (e) { log.push('справочник не прочитан: ' + e.message); }
+  }
+
+  const vl = [...SEEN.keys()].sort().map(id => ({id, fields: {}, keys: SEEN.get(id)}));
+  log.push('слоёв найдено: ' + vl.length + ' (в тайле ' + probed.size + ')');
   const ids = new Set(vl.map(v => v.id));
 
   /* какие слои тайлсета уже оформлены в стиле — их сами не рисуем */
@@ -343,8 +426,7 @@ async function build() {
     const color = PALETTE[i % PALETTE.length];
     const base  = 'mbx-' + v.id;
     /* границы не заливаем: они покрывают всю сушу и закроют карту */
-    const isBoundary = !!(v.fields &&
-      Object.prototype.hasOwnProperty.call(v.fields, 'admin_level'));
+    const isBoundary = !!(v.keys && v.keys.has('admin_level'));
     const added = [];
     const specs = [];
     if (!isBoundary) specs.push({id: base+'-fill', type:'fill', source:'mbx',
@@ -431,13 +513,29 @@ async function watch() {
       return;
     }
   } catch (e) {}
+  /* Появление слоя — пересобираем сразу. Исчезновение — только если
+     слоя не видно три опроса подряд: одиночный пропуск это кеш
+     Mapbox, а не удаление. */
   try {
-    const tj = await fetchJSON(tilejsonURL());
-    const key = tilesetKey(tj);
-    if (seenTilesetKey && key && key !== seenTilesetKey) {
-      seenTilesetKey = key;
-      map.setStyle(STYLE, {diff:false});
+    const probed = await probeTiles();
+    if (!probed.size) return;              /* тайл не приехал — не трогаем */
+    let changed = false;
+    for (const id of probed.keys()) {
+      MISS.delete(id);
+      if (!SEEN.has(id)) changed = true;
     }
+    for (const id of [...SEEN.keys()]) {
+      if (probed.has(id)) continue;
+      const n = (MISS.get(id) || 0) + 1;
+      MISS.set(id, n);
+      if (n >= MISS_LIMIT) {
+        SEEN.delete(id);
+        MISS.delete(id);
+        changed = true;
+        log.push('слой ' + id.slice(0,8) + ' удалён в Mapbox, убираю');
+      }
+    }
+    if (changed) map.setStyle(STYLE, {diff:false});
   } catch (e) {}
 }
 setInterval(watch, POLL_MS);
