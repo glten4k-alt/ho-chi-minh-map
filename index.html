@@ -273,6 +273,7 @@ function tileXY(lon, lat, z) {
 const PROBE = {lng: 106.845, lat: 10.800};
 
 let TILE_MAXZOOM = 12;   /* уточняется из справочника при сборке */
+let TILE_VER = '0';      /* версия тайлсета, попадает в адрес тайла */
 
 async function probeTiles() {
   const found = new Map();
@@ -384,6 +385,7 @@ async function build() {
   try {
     const tj = await fetchJSON(tilejsonURL());
     if (typeof tj.maxzoom === 'number') TILE_MAXZOOM = tj.maxzoom;
+    if (tj.modified) TILE_VER = String(tj.modified);
     if (!probed.size && !SEEN.size) {
       for (const v of (tj.vector_layers || [])) {
         if (!SEEN.has(v.id)) SEEN.set(v.id, new Set(Object.keys(v.fields || {})));
@@ -435,10 +437,17 @@ async function build() {
        отсутствует, и движок молча отказывается его рисовать —
        галочка есть, геометрии нет. С прямым адресом тайлов сверки
        нет, рисуется всё, что реально лежит в тайле. */
+    /* Версия в адресе обязательна. Тайлы отдаются с max-age=43200:
+       браузер держит их полсуток и, поскольку адрес не меняется,
+       не перезапрашивает. Слой, добавленный в Mapbox позже, для
+       такого браузера просто не существует — именно так метро 6
+       было в тайлсете, но не на карте. Версия меняется при каждой
+       пересборке тайлсета и заставляет скачать заново. */
     map.addSource('mbx', {
       type: 'vector',
       tiles: ['https://api.mapbox.com/v4/' + TILESET +
-              '/{z}/{x}/{y}.vector.pbf?access_token=' + mapboxgl.accessToken],
+              '/{z}/{x}/{y}.vector.pbf?access_token=' + mapboxgl.accessToken +
+              '&v=' + TILE_VER],
       minzoom: 0,
       maxzoom: TILE_MAXZOOM
     });
